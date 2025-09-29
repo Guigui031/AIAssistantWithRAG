@@ -47,8 +47,15 @@ def load_documents(directory_path):
             for index, row in pd.read_csv(file_path).iterrows():
                 # Convert each row to readable text
                 readable_description = create_readable_text_from_row(row)
+                
+                # Add metadata (e.g., year, month) if available
+                metadata = {}
+                date = pd.to_datetime(row["num_date"])
+                metadata["year"] = date.year
+                metadata["month"] = date.month
+                
                 # Create a Document object (LangChain's format)
-                doc = Document(page_content=readable_description)
+                doc = Document(page_content=readable_description, metadata=metadata)
                 documents.append(doc)
             
     print(f"Loaded {len(documents)} documents")
@@ -94,7 +101,7 @@ def setup_qa_chain_groq(vectorstore):
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3, "filter": {"year": 2025, "month": 10}}),
         return_source_documents=True
     )
     
