@@ -1,0 +1,319 @@
+Chapter
+2 — Extraction Strategy for Accurate RAG over Structured Databases | by
+Madhukar Kumar | Software, AI and Marketing | MediumSitemapOpen in appSidebar menuMedium LogoWriteSearchNotificationsSidebar menuMedium LogoHomeLibraryProfileStoriesStatsFollowingFind writers and publications to follow.See suggestionsSoftware, AI and Marketing·Follow publicationMusings about growth marketing, Gen AI and random thoughtsFollow publicationChapter 2 — Extraction Strategy for Accurate RAG over Structured DatabasesMadhukar KumarFollowing15 min read·Mar 1, 2025671ListenShareMorePress enter or click to view image in full sizeLink to Chapter 1Chapter 2 - Knowledge Extraction from Structured DataGiven
+that the quality of retrieval is dependent on the quality of contextual
+data, in this chapter, let’s look at some strategies to extract and
+organize knowledge from a structured data store ( we will use
+SingleStore as a database because it can store SQL/JSON and can do
+analytics, vector and keyword searches in one place) for use in RAG
+first. We will cover how to gather metadata, sample data, entity
+relationships from the database, and how to store this information
+(including vector embeddings) to enable downstream efficient retrieval.
+Enabling RAG on this data means the LLM can ground its answers on actual
+database content, reducing hallucinations. By embedding structured data
+(tables, rows, etc.) into a semantic vector space, we ensure the LLM
+retrieves context-aware, accurate information from the database​.Let’s look at some key aspects of of our extraction strategy:Metadata (table names, column names, types, etc.): Provides the schema context so the LLM knows what data is available and how it’s structured.Sample Data: A
+few example rows from tables help the LLM understand the semantics of
+each column (e.g. value ranges, formats), improving its ability to
+interpret user queries in terms of the schema.Entity Relationships:
+Knowledge of how tables relate (via foreign keys or inferred links) is
+critical for answering multi-table questions correctly. Structured
+relationships between entities help retrieve relevant info and generate
+correct joined results​.In
+summary, extracting schema metadata, representative data samples, and
+relationships from a database and feeding these to the RAG pipeline
+allows the LLM to effectively utilize structured data. It enriches the
+retrieval context so that the model can identify which tables/fields are
+relevant to a user query and how to combine them for an answer. This
+leads to more accurate SQL generation or direct data retrieval, and
+ultimately more accurate, grounded responses.Metadata ExtractionThe
+first step is to extract schema metadata from the database. This
+includes table names, column information (name, data type, nullability),
+primary/foreign keys, constraints, and indexes. Metadata gives a
+high-level map of the data:— Table names and optionally table row counts or descriptions indicate the domain (e.g. a table Customers vs. Orders).
+— Column names and types tell what each table contains (e.g. Customers has CustomerID INT, Name VARCHAR(100), etc.).
+— Primary keys and unique constraints highlight key identifiers. Foreign keys reveal relationships between tables (if defined in the schema).
+— Indexes
+show which columns are optimized for search or join (useful for
+understanding important columns, though not directly used by the LLM,
+it’s metadata we can store).Most SQL databases (including SingleStore) provide this information via an information schema
+or system catalog. SingleStore, for example, supports MySQL-compatible
+information_schema views that list tables, columns, and constraints​. We
+can query these to automate metadata extraction.Automated Metadata Extraction Pseudo-code:function extract_schema_metadata(connection, database_name): schema_info = {} # 1. Get all tables in the database tables = run_query(connection, “SELECT table_name
+FROM information_schema.tables WHERE table_schema = ?”,
+database_name)
+for each table in tables: table_name = table[“table_name”]
+# Initialize metadata storage for this table schema_info[table_name] = {}
+# 2. Get all columns for the table columns = run_query(connection, “SELECT column_name, data_type, is_nullable, column_key, column_type FROM information_schema.columns WHERE table_schema = ? AND table_name = ?”, database_name, table_name) schema_info[table_name][“columns”] = columns # list of column info
+# 3. Get indexes for the table (if needed) indexes = run_query(connection, “SHOW INDEX FROM “ + table_name) # or query information_schema.statistics schema_info[table_name][“indexes”] = indexes # index name, column, type, etc.
+# 4. (Optional) Get table constraints (primary keys, etc.) constraints = run_query(connection, “SELECT constraint_name, column_name, referenced_table_name, referenced_column_name FROM information_schema.key_column_usage WHERE table_schema = ? AND table_name = ?”, database_name, table_name) schema_info[table_name][“constraints”] = constraints
+return schema_infoIn
+the above pseudo-code, we use `information_schema.tables` to list all
+tables in the target database, then for each table use
+`information_schema.columns` to get column details. We also demonstrate
+how to retrieve index info (using a `SHOW INDEX` query or
+`information_schema.statistics`) and constraints including foreign keys
+(`information_schema.key_column_usage` where `referenced_table_name` is
+not null) Note — SingleStore does not support foreign keys so this is illustrative for using in other databases.
+In practice, you might refine the queries to get exactly the needed
+fields (e.g., include `column_type` for full type details like length,
+and use `constraint_type=’FOREIGN KEY’` in another info schema table for
+clarity).The
+result of this extraction is a structured representation (e.g. a
+dictionary or JSON) of the schema. For example,
+`schema_info[“Customers”][“columns”]` might list columns like
+`[{“column_name”: “CustomerID”, “data_type”: “INT”, “is_nullable”: “NO”,
+…}, {“column_name”: “Name”, “data_type”: “VARCHAR(100)”, …}, …]`. This
+metadata will later be stored in our knowledge base.Given
+that in large enterprises, schemas can be extensive, this should be
+implemented as an asynchronous job and run on a schedule or get
+triggered on schema migration events, ensuring up-to-date knowledge base
+for the LLM without manual effort.Sample Data ExtractionSchema
+metadata alone may not fully convey the meaning of the data. To make
+the solution more robust let’s also look at extracting sample data from each table to build the knowledge:Understanding data values:
+For instance, a column `status_code INT` is abstract by name, but
+sample rows might show values like `0, 1, 2` which an LLM can correlate
+to statuses (maybe 0=Inactive, 1=Active, etc.) if combined with other
+knowledge. A `date` column sample shows format (e.g. `YYYY-MM-DD`). Disambiguating similar schemas: If two tables have a column `name`, sample values (person names vs. product names) tell which context it belongs to. Schema semantics:
+The content of a table can clarify its purpose. A table `Settings` with
+sample rows of key-value pairs indicates a config lookup table, for
+example.When
+providing the LLM with context, including a few sample rows per table
+can significantly improve its comprehension of the schema​. In fact,
+practitioners recommend supplying sample records along with schema in
+prompts to help guide the LLM in writing correct queries or answers​.Strategies for Efficient Sample Retrieval:Limit the number of rows:
+For each table, retrieving 3–5 representative rows is usually
+sufficient. This keeps the prompt light and avoids overloading the
+database. Use `SELECT * FROM table LIMIT N;` to fetch a small sample.Random sampling vs. top rows:
+Simply taking the first N rows may introduce bias (e.g., if the table
+is sorted or clustered in a certain way). If possible, sample randomly
+to get diverse examples. For instance, in SQL you might do `ORDER BY
+RAND() LIMIT 5` (though note that this can be expensive on large tables
+as it scans the whole table). If random sampling is too costly, even the
+first few rows are better than none, or use a heuristic (e.g., skip a
+large offset then take a few).Project specific columns if needed:
+If a table has many columns (wide table), it might be inefficient or
+unnecessary to retrieve all for sample. You could select a subset of key
+columns for example data, especially if some columns are large blobs or
+JSON. For example, `SELECT id, name, status FROM Customers LIMIT 5;`
+instead of all columns if others are not informative.Avoid heavy joins or computations:
+Just fetch raw rows. The goal is not to compute any analytics, just to
+show the data shape. This should be a light operation especially with
+proper indexing.Example:Suppose
+we have a table `Orders` with columns `(OrderID, CustomerID, OrderDate,
+TotalAmount, Status)`. A sample extraction might run `SELECT * FROM
+Orders LIMIT 5;` and get results like:OrderID | CustomerID | OrderDate | TotalAmount | Status- - - - + - - - - - -+ - - - - - - + - - - - - - + - - - - 1001 | 501 | 2023–01–15 | 250.00 | SHIPPED1002 | 502 | 2023–01–16 | 125.50 | PENDING…These
+sample rows tell us that `Status` contains values like “SHIPPED”,
+“PENDING” (so it’s text, likely order state), `OrderDate` is a date,
+etc. We would store a few of these samples (perhaps as part of a JSON or
+text snippet) associated with the `Orders` table in our knowledge base.Performance considerations: If the database is large, doing a sample for each table one-by-one could still be a lot of queries. You can optimize by:Running sample queries in parallel (many DB clients or threads) if the DB can handle concurrent reads. Sampling only key tables first (we’ll discuss prioritization in a later section).Caching
+the samples and updating them less frequently than schema (data content
+can change often, but schema semantics usually remain unless the data
+distribution changes drastically).The
+sample data, combined with metadata, will allow the LLM to better
+understand the context. When a user asks a question, the retrieval
+system can fetch not just column names but also “for example,
+Orders.Status values include SHIPPED, PENDING, etc.” which provides
+strong hints for the LLM to formulate accurate queries or answers.Entity Relationship Extraction Using LLMsUnderstanding
+how entities (tables) relate to each other is vital for answering
+complex questions. (If you read one of my Medium articles you will see
+that we used this strategy to also increase the accuracy for retrieval
+for RAG over unstructured data as well). Many schemas have foreign key
+relationships defined explicitly. However, in some cases relationships
+exist conceptually even if not declared in the database (e.g., a column
+`CustomerID` in an Orders table referencing a Customers table, without
+an actual FOREIGN KEY constraint). We can leverage both **database
+metadata** and **LLM inference** to extract a comprehensive set of
+relationships.1. Extracting Declared Relationships: First,
+use the metadata from earlier to get any declared foreign keys. For
+example, query the information schema for foreign key constraints:SELECT table_name, column_name, referenced_table_name, referenced_column_nameFROM information_schema.key_column_usageWHERE table_schema = ‘mydb’AND referenced_table_name IS NOT NULL; This yields relationships like: `Orders.customer_id -> Customers.id`, etc., for all formally defined foreign keys.2. Inferring Relationships with LLMs: Not
+all relations are explicitly declared. An LLM can help infer likely
+relationships by analyzing table and column naming and even data
+patterns:— Name-based inference:
+Feed the LLM with all table names and columns and ask it to find
+columns that likely refer to keys of other tables. For example, if one
+table has `customer_id` and another table is named `customers` with an
+`id` column, a reasonable inference is that `customer_id` is a foreign
+key to `customers.id`. Similarly, columns like `user_id`,
+`product_code`, `employee_id` often indicate references to another
+entity table.
+— Data pattern checks:
+In some cases, just matching names isn’t enough (e.g. two tables both
+have a column named `account_number`). If feasible, compare sample data:
+do values in one column appear in another’s primary key column? An LLM
+could be given a small set of values from each and asked if it sees
+overlap or a pattern of foreign key. For instance, if all
+`Orders.CustomerID` samples are found in the set of
+`Customers.CustomerID` samples, it reinforces that relationship.
+— Schema description context: Provide the LLM with the schema metadata and ask it to output likely entity-relationship pairs.The prompt could be: “Given
+the following tables and columns, identify how tables relate: {list of
+tables and columns}. Provide likely foreign key relationships.”* The LLM
+can then output something like: *”Orders.CustomerID references
+Customers.CustomerID (each order is associated with a customer).
+Payments.OrderID references Orders.OrderID.”Example LLM Relationship Inference Prompt (pseudo-code):tables = schema_info.keys()for each pair of tables (T1, T2) in tables: # If a foreign key already known for T1->T2, skip (already captured) prompt = f”Table {T1} has columns {schema_info[T1][‘columns’]}. “ +
+f”Table {T2} has columns {schema_info[T2][‘columns’]}. “ +
+“Do you recognize any logical relationship between these tables (e.g., foreign keys or joins)?” response = call_llm(prompt) if response contains a relationship description: relationships.add(parse_relationship(response))In
+practice, you may refine this process: check for candidate columns
+(like matching name patterns) to reduce the combination search space,
+then verify with LLM or directly via data samples. The LLM might output a
+structured result (or we can prompt it to format as JSON) indicating
+the relationship and rationale.— Storing Relationships:
+We need to store the discovered relationships in our knowledge base.
+This could be a separate list or table of relationships, or embedded in
+each table’s metadata. For example, we might store for table `Orders` a
+metadata field like `”related_to”: [{“table”: “Customers”, “column”:
+“CustomerID”, “ref_column”: “Customers.CustomerID”}]`. Alternatively, a
+separate `relationships` collection could have entries: `{from_table:
+“Orders”, from_column: “CustomerID”, to_table: “Customers”, to_column:
+“CustomerID”, type: “inferred”}`.Each
+relationship entry can be turned into a natural language statement for
+the LLM’s benefit, such as *”Orders table is related to Customers table
+via the CustomerID field”* or *”Each record in the Orders table
+references a record in Customers (Orders.CustomerID =
+Customers.CustomerID)”*. These statements will be indexed for retrieval.By
+using LLMs to augment the explicit schema, we ensure that even
+undocumented or implicit links are captured. This is especially useful
+in older databases where foreign keys were not enforced, or
+cross-database relationships that are known in the business logic but
+not in the schema. Having these relations available to the RAG system
+will significantly improve the accuracy of multi-table queries.— Optimizations for Large SchemasIn
+a large enterprise database, there could be hundreds of tables and
+thousands of columns. Extracting and storing everything naively might be
+impractical or slow. We need strategies to optimize:Partial or Prioritized Extraction:
+Focus on the most relevant parts of the schema first. If we have usage
+data or domain knowledge, prioritize important tables (for example,
+tables that are frequently queried or contain critical business data).
+You might maintain a allowlist of key tables to include in the knowledge
+base initially, and add others on demand when queries hit them. Size-based Decisions:
+Very large tables (with millions of rows or very wide columns) might
+not need sample data extracted at all, especially if their content is
+highly dynamic or too granular for typical questions. For such tables,
+you might include just metadata and skip samples, or sample only a few
+key columns. Similarly, for a table with 50 columns, maybe only provide
+samples for the most important 10 columns that are likely to be queried.
+Use of Summaries for Groups of Tables:
+If tables are logically grouped (e.g., partitioned tables or a set of
+child tables), consider summarizing at a higher level. For instance, if
+you have monthly partitioned tables like `Sales_Jan, Sales_Feb, …`, you
+might document them collectively as “Sales (partitioned by month)”
+rather than individually, to avoid repetition in the knowledge base. Indexing and Querying the Knowledge Base:
+Once the metadata, samples, and relationships are stored (we’ll discuss
+storage next), ensure the knowledge base is indexed for efficient
+retrieval. This means: Creating an inverted index or full-text index
+on textual fields (like table names, column names, descriptions) for
+fast keyword search. That way, if a user query mentions “customer” or
+“order”, we can quickly find relevant tables before even doing vector
+similarity.
+Utilizing vector indexes for semantic search (more on this shortly in the storage section). Ensuring
+we can filter by schema if the RAG system should only consider certain
+databases or schemas in a multi-DB environment (e.g., restrict to one
+business domain’s schema based on context). Incremental Updates:
+Instead of re-extracting everything from scratch, use a timestamp or
+versioning approach. If the database supports information on last
+altered time for tables or a schema change log, extract only changed
+parts. For data samples, perhaps refresh periodically (e.g., daily) or
+when distribution likely changed. Parallel Processing:
+For initial extraction on a huge schema, parallelize the work — e.g.,
+multiple threads each handling a subset of tables — to speed it up.
+SingleStore as a distributed database can handle concurrent metadata
+queries well, especially since reading from information_schema is not
+heavy.The
+goal of these optimizations is to keep the knowledge base lean and
+focused. You want just enough information to aid retrieval and query
+generation, but not so much that it overwhelms either the retrieval
+system or the LLM context window. By intelligently selecting what to
+extract and index, we ensure scalability even as schema size grows.Human(s) in the LoopI
+should note here that given the non-deterministic nature of LLMs, we
+cannot, at this stage blindly assume that despite our due delligence
+what we extracted and imputed is 100% correct so I always recommend now
+presenting this data back to the humans (data architects in this case)
+to validate, verify and even modify this assumptions. This requires
+building a separate application of “knowledge management for RAG” but an
+essential step to ensure 100% accuracy and compliance.Storage Strategy in SingleStoreAfter
+extracting metadata, samples, and relationships, we need to store this
+“extracted knowledge” in a way that our RAG system can query it. We will
+use SingleStore both as our primary data source and as the storage for
+the knowledge base. This leverages SingleStore’s capabilities: it
+supports JSON data, vector search indexes, and traditional SQL queries,
+allowing a unified solution.Our storage strategy will use a hybrid approach:JSON to store structured metadata and samples for flexibility. Vector embeddings stored in a vector index for semantic similarity search. Exact keyword matching through SQL filtering or full-text indexes for precise lookups.Example Knowledge Base Schema:Let’s design a table `knowledge_base` in SingleStore to hold the info:CREATE TABLE knowledge_base ( id INT PRIMARY KEY AUTO_INCREMENT, object_type VARCHAR(20), --‘table’, ‘column’, or ‘relationship’table_name VARCHAR(255), column_name VARCHAR(255), content JSON, --JSON document holding metadata or sample dataembedding VECTOR(768) NULL, --vector embedding of the content for semantic searchKEY (table_name), --index on table_name for quick exact lookupsFULLTEXT (content), --(if SingleStore supports FULLTEXT on JSON or text)INDEX emb_idx (embedding) USING HNSW WITH DIMENSIONS=768 ); Explanation:`object_type`:
+We categorize the entry. We might store a separate entry for each
+table, each column, and each relationship. For example, a row where
+`object_type=’table’` and `table_name=’Customers’` could represent
+general info about the Customers table (with a JSON containing
+description, list of columns, etc.). A row where `object_type=’column’`
+might represent a specific column (though we could also merge this with
+the table entry’s JSON). Similarly, `object_type=’relationship’` could
+store a relationship fact.
+`table_name` and `column_name`: These
+help with filtering. For relationship entries, we might use `table_name`
+as `”Orders-Customers”` or similar, and `column_name` could store
+`”CustomerID -> CustomerID”` or something descriptive.
+`content JSON`: This holds the detailed info. For a table, the JSON might look like: { “columns”: [ {“name”: “CustomerID”, “type”: “INT”, “nullable”: false, “indexed”: true}, {“name”: “Name”, “type”: “VARCHAR(100)”, “nullable”: false}, … ], “sample_rows”: [ {“CustomerID”: 501, “Name”: “Alice Smith”, “Country”: “US”, …}, {“CustomerID”: 502, “Name”: “Bob Jones”, …} ], “relationships”: [ {“to_table”: “Orders”, “on”: “Customers.CustomerID = Orders.CustomerID”} ] } For
+a relationship entry, the JSON might simply have
+`{“from_table”:”Orders”,”from_column”:”CustomerID”,”to_table”:”Customers”,”to_column”:”CustomerID”}
+` along with maybe a natural language description.`embedding
+VECTOR(768)`: We store a vector embedding of the content or a textual
+summary of it. The dimension 768 is an example (if using OpenAI Ada
+embeddings, etc.); it could be 1536 or any size depending on the model.
+SingleStore supports a vector type and can index it for similarity
+search​ (ensure you are using the same dimension as the one you receive
+from the model). By storing embeddings in the database, we avoid needing
+a separate vector store; SingleStore allows vectors in regular tables
+and querying them with SQL alongside other conditions​.We add a regular index on `table_name` for fast exact match (e.g., if a query explicitly mentions a table).Optionally,
+a FULLTEXT index on `content` if we want to allow full-text search over
+the JSON (SingleStore can index text inside JSON by indexing a computed
+text field, or we could store a text column for combined content).The
+`emb_idx` is a vector index (using HNSW here for approximate nearest
+neighbors) on the `embedding` column to enable fast semantic similarity
+search. This means we can do queries like:SELECT * FROM knowledge_base ORDER BY embedding <-> [vector_of_query] LIMIT 5; get the top 5 semantically closest knowledge entries to a given query embedding.Populating the Knowledge Base:For
+each table from metadata extraction, create a JSON as shown and insert a
+row with `object_type=’table’`. Compute an embedding for a text summary
+of the table (e.g., a concatenation of table name, column names, and
+maybe sample values). This embedding will capture semantic content (so a
+query like “customer information” will be similar to the Customers
+table embedding). If needed, also insert separate entries for
+important columns (`object_type=’column’`) with more focused content.
+For example, if a column has a specific meaning (like a status code
+mapping), having it separately might help if a query directly mentions a
+field. Insert entries for each relationship. We can generate a
+short sentence like `”Orders have a CustomerID that refers to
+Customers.CustomerID”` and embed that. This way, if a query involves
+both Orders and Customers, the embedding of that relationship might
+surface. The JSON content for relationships can also be stored if we
+want to do any reasoning over JSON (though mostly the natural text and
+embedding are for retrieval).Using SingleStore for this storage is advantageous because it’s one system for
+both our primary data and our knowledge index. SingleStore is a
+”vector-capable SQL database”, meaning we can store embeddings and
+perform vector similarity search directly via SQL​. We also retain the
+power of SQL filtering. For example, we could query for all knowledge
+base entries where `table_name = ‘Customers’` and object_type !=
+‘relationship’ to get all info related to Customers, or do a keyword
+filter like `WHERE content LIKE ‘%Orders%’`.Example SQL Schema Entry (Knowledge Base):Here’s a concrete example of a knowledge base entry for a `Customers` table: `object_type`: “table”
+`table_name`: “Customers”
+`column_name`: NULL (not applicable for table-level entry)
+`content`: JSON:{ “columns”: [ {“name”: “CustomerID”, “type”: “INT”, “primary_key”: true}, {“name”: “Name”, “type”: “VARCHAR(100)”}, {“name”: “Email”, “type”: “VARCHAR(255)”}, {“name”: “Country”, “type”: “VARCHAR(50)”} ], “sample_rows”: [ {“CustomerID”: 101, “Name”: “Alice Smith”, “Email”: “alice@example.com”, “Country”: “US”}, {“CustomerID”: 102, “Name”: “Bob Jones”, “Email”: “bob@example.com”, “Country”: “UK”} ], “relationships”: [ {“to_table”: “Orders”, “on”: “Customers.CustomerID = Orders.CustomerID”} ] } `embedding`: (vector of floats representing the semantic embedding of e.g. the text "Customers table with columns CustomerID, Name, Email, Country. Sample values: Alice Smith, … Each order is linked to a customer by CustomerID.")All
+this is stored in a single row of the `knowledge_base` table. We would
+do similar for `Orders` and any other tables. A relationship entry for
+Customers-Orders might have:`object_type`: "relationship"
+`table_name`: "Customers" (or "Orders-Customers")
+`column_name`: "CustomerID"
+`content`: `{"from_table":"Orders","from_column":"CustomerID","to_table":"Customers","to_column":"CustomerID"}`
+`embedding`: vector for text "Orders.CustomerID references Customers.CustomerID"Note,
+that the steps above are general guidelines and depending on the
+industry and use cases, you may add or modify some of these steps to
+better fine tune for your requirements.With
+the knowledge base set up, we will be able to perform both semantic
+searches (via the vector index) and keyword constrained searches (via
+SQL filters or full-text) to retrieve relevant schema pieces for any
+user query in our next chapter.✌️DatabaseAIRetrieval Augmented GenSoftware DevelopmentSoftware Engineering67671FollowPublished in Software, AI and Marketing223 followers·Last published Aug 3, 2025Musings about growth marketing, Gen AI and random thoughtsFollowFollowingWritten by Madhukar Kumar1.5K followers·311 followingCMO @Siurxegraph, tech buff, ind developer, hacker, distance runner ex @redislabs ex @zuora ex @oracle. My views are my ownFollowingResponses (1)Guillaume GenoisWhat are your thoughts?﻿CancelRespondJjmJun 9This is a fantastic article! Exactly what I was looking for. When are you releasing the last 4 chapters?1ReplyMore from Madhukar Kumar and Software, AI and MarketingInSoftware, AI and MarketingbyMadhukar KumarA Comprehensive Guide to Vibe Coding ToolsIf
+you have been hanging around developers watering holes (X and YouTube),
+chances are you have come across a new emerging lexicon with…Mar 30A clap icon847A response icon23InSoftware, AI and MarketingbyMadhukar KumarHow to Build a Full-Stack App with an AI Coding AgentA hands-on guide to creating a modern web application using agentic AI developmentJun 24A clap icon143A response icon6InSoftware, AI and MarketingbyMadhukar KumarStep-by-Step Guide to Boosting Enterprise RAG AccuracyIn
+my previous blog I wrote about how semantic chunking with newer models
+like Gemini Flash 2.0 with very large context sizes can…Feb 19A clap icon243A response icon4InSoftware, AI and MarketingbyMadhukar KumarA Developer’s Roadmap to Getting Started with AI in 2025In
+my last article, I wrote about a learning path of AI for beginners, in
+an attempt to demystify its tools and applications for day-to-day…Jan 1A clap icon240A response icon9See all from Madhukar KumarSee all from Software, AI and MarketingRecommended from MediumInLevel Up CodingbyFareed KhanBuilding 17 Agentic AI Patterns and Their Role in Large-Scale AI SystemsEnsembling, Meta-Control, ToT, Reflexive, PEV and more3d agoA clap icon1.3KA response icon24Sakshee PatilI never understood the fuss over using Knowledge Graphs with RAG…Is it worth the hype? How knowledge graphs (KGs) are constructed and queried, and what I learned digging deeper…Sep 12A clap icon6A response icon1InNeo4j Developer BlogbyAlex GilmoreKnowledge Graph GenerationStrategies and methods for knowledge graph generationSep 22A clap icon87A response icon2Rick HightowerBuilding AI-Powered Search and RAG with PostgreSQL and Vector EmbeddingsUnlock
+the future of search! Discover how PostgreSQL’s vector embeddings are
+empower traditional databases into powerful AI-driven search!May 5A clap icon26InMITB For AllbyTituslhyText-to-SQL Just Got Easier: Meet Vanna AI, Your Text-to-SQL AssistantBuilding
+a gorgeous, fullstack, production ready text-to-sql application with
+Vanna AI, Chainlit & LlamaIndex. PS: The secret sauce is RAG!Jun 12A clap icon83A response icon2StefentaimeOptimizing SQL Queries with Semantic Caching and Text-to-SQL GenerationUnderstanding the ChallengeApr 13A clap icon45See more recommendationsHelpStatusAboutCareersPressBlogPrivacyRulesTermsText to speech
+All your favorite parts of Medium are now in one sidebar for easy access.Okay, got it

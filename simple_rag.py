@@ -1,4 +1,6 @@
 import os
+import langchain
+from unittest import result
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader, CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -10,7 +12,7 @@ from langchain.chains import RetrievalQA
 from langchain.schema import Document
 import pandas as pd
 
-
+langchain.debug = True 
 def create_readable_text_from_row(row):
     """
     Convert a single CSV row into a natural language description
@@ -43,19 +45,20 @@ def load_documents(directory_path):
             # data = loader.load()
             # documents.extend(data)
             
-            # Convert all rows to readable text documents
-            for index, row in pd.read_csv(file_path).iterrows():
-                # Convert each row to readable text
-                readable_description = create_readable_text_from_row(row)
+            df = pd.read_csv(file_path)
+            # Group rows by year and month
+            for (year, month), group in df.groupby(["year", "month"]):
+                # Convert all rows in the group into text
+                rows_text = [create_readable_text_from_row(row) for _, row in group.iterrows()]
                 
-                # Add metadata (e.g., year, month) if available
-                metadata = {}
-                date = pd.to_datetime(row["num_date"])
-                metadata["year"] = date.year
-                metadata["month"] = date.month
+                # Join them into a single "document"
+                combined_text = "\n".join(rows_text)
                 
-                # Create a Document object (LangChain's format)
-                doc = Document(page_content=readable_description, metadata=metadata)
+                # Create Document with metadata
+                doc = Document(
+                    page_content=combined_text,
+                    metadata={"year": int(year), "month": int(month)}
+                )
                 documents.append(doc)
             
     print(f"Loaded {len(documents)} documents")
@@ -101,8 +104,8 @@ def setup_qa_chain_groq(vectorstore):
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3, "filter": {"year": 2025, "month": 10}}),
-        return_source_documents=True
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
+        return_source_documents=True,
     )
     
     return qa_chain
@@ -153,7 +156,6 @@ def main():
             
         try:
             result = qa_chain.invoke({"query": question})
-            
             print(f"\n💬 Answer: {result['result']}\n")
             
             # Show source documents for transparency
