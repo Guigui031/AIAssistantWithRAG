@@ -1,7 +1,9 @@
+pandas
 streamlit
 langchain
 langchain-community
 langchain-groq
+langgraph
 chromadb
 sentence-transformers
 pandas
