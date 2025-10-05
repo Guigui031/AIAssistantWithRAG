@@ -1,3 +1,4 @@
+import os
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -18,70 +19,13 @@ from typing_extensions import Annotated
 from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
 from langchain_groq import ChatGroq
 from langchain_core.tools import tool
+from typing import Dict, Any
+# from langchain_ollama.llms import OllamaLLM
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
 
 
 load_dotenv()
-
-# Global variables
-# llm = ChatGroq(model_name="llama-3.3-70b-versatile")
-llm = init_chat_model("claude-sonnet-4-20250514")
-    
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-vector_store = Chroma(
-    collection_name="example_collection",
-    embedding_function=embeddings,
-    persist_directory="./chroma_langchain_db",  # Where to save data locally, remove if not necessary
-)
-
-# SQL
-db = SQLDatabase.from_uri("sqlite:///cruises.db")
-
-
-system_message = """
-You are an agent designed to interact with a SQL database.
-Given an input question, create a syntactically correct {dialect} query to run,
-then look at the results of the query and return the answer. Unless the user
-specifies a specific number of examples they wish to obtain, always limit your
-query to at most {top_k} results.
-
-You can order the results by a relevant column to return the most interesting
-examples in the database. Never query for all the columns from a specific table,
-only ask for the relevant columns given the question.
-
-You MUST double check your query before executing it. If you get an error while
-executing a query, rewrite the query and try again.
-
-DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
-database.
-
-To start you should ALWAYS look at the tables in the database to see what you
-can query. Do NOT skip this step.
-
-Then you should query the schema of the most relevant tables.
-
-Never query for all the columns from a specific table, only ask for a the
-few relevant columns given the question.
-
-Pay attention to use only the column names that you can see in the schema
-description. Be careful to not query for columns that do not exist. Also,
-pay attention to which column is in which table.
-
-Only use the following tables:
-{table_info}
-""".format(
-    dialect="SQLite",
-    top_k=5,
-    table_info=db.get_table_info(),
-)
-
-user_prompt = "Question: {input}"
-
-query_prompt_template = ChatPromptTemplate(
-    [("system", system_message), ("user", user_prompt)]
-)
-
-print(system_message)
 
 
 class State(TypedDict):
@@ -97,6 +41,188 @@ class QueryOutput(TypedDict):
     query: Annotated[str, ..., "Syntactically valid SQL query."]
 
 
+class CruiseRAG:
+    """RAG system combining SQL database queries with vector store retrieval"""
+
+    def __init__(self, db_path: str = None, chroma_persist_dir: str = "./chroma_langchain_db"):
+        """Initialize the RAG system
+
+        Args:
+            db_path: Path to SQLite database. If None, uses cruises.db in same directory
+            chroma_persist_dir: Directory for Chroma vector store persistence
+        """
+        # Set up database path
+        if db_path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(script_dir, "cruises.db")
+
+        # Initialize LLM
+        # self.llm = ChatGroq(model_name="llama-3.3-70b-versatile")
+        self.llm = init_chat_model("llama3.1", model_provider="ollama")
+
+        # Initialize embeddings and vector store
+        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        self.vector_store = Chroma(
+            collection_name="example_collection",
+            embedding_function=self.embeddings,
+            persist_directory=chroma_persist_dir,
+        )
+
+        # Initialize SQL database
+        self.db = SQLDatabase.from_uri(f"sqlite:///{db_path}")
+
+        # Set up system message and prompts
+        self._setup_prompts()
+
+        # Create agent executor
+        self._setup_agent()
+
+    def _setup_prompts(self):
+        """Set up system prompts and templates"""
+        self.system_message = """
+        You are an agent designed to interact with a SQL database.
+        Given an input question, create a syntactically correct {dialect} query to run,
+        then look at the results of the query and return the answer. Unless the user
+        specifies a specific number of examples they wish to obtain, always limit your
+        query to at most {top_k} results.
+
+        You can order the results by a relevant column to return the most interesting
+        examples in the database. Never query for all the columns from a specific table,
+        only ask for the relevant columns given the question.
+
+        You MUST double check your query before executing it. If you get an error while
+        executing a query, rewrite the query and try again.
+
+        DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
+        database.
+
+        To start you should ALWAYS look at the tables in the database to see what you
+        can query. Do NOT skip this step.
+
+        Then you should query the schema of the most relevant tables.
+
+        Never query for all the columns from a specific table, only ask for a the
+        few relevant columns given the question.
+
+        Pay attention to use only the column names that you can see in the schema
+        description. Be careful to not query for columns that do not exist. Also,
+        pay attention to which column is in which table.
+
+        Only use the following tables:
+        {table_info}
+        """.format(
+            dialect="SQLite",
+            top_k=5,
+            table_info=self.db.get_table_info(),
+        )
+
+        user_prompt = "Question: {input}"
+        self.query_prompt_template = ChatPromptTemplate(
+            [("system", self.system_message), ("user", user_prompt)]
+        )
+
+    def _setup_agent(self):
+        """Set up the agent with tools"""
+        # Create retrieve tool bound to this instance
+        @tool(response_format="content_and_artifact")
+        def retrieve(query: str):
+            """Retrieve information related to a query."""
+            retrieved_docs = self.vector_store.similarity_search(query, k=2)
+            serialized = "\n\n".join(
+                (f"Source: {doc.metadata}\nContent: {doc.page_content}")
+                for doc in retrieved_docs
+            )
+            return serialized, retrieved_docs
+
+        # Set up SQL toolkit and tools
+        toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
+        tools = toolkit.get_tools()
+        tools.append(retrieve)
+        tools = ToolNode(tools)
+
+        # Create memory and agent
+        memory = MemorySaver()
+        self.agent_executor = create_react_agent(
+            self.llm,
+            tools,
+            prompt=self.system_message,
+            checkpointer=memory
+        )
+
+        self.config = {"configurable": {"thread_id": "default"}}
+
+    def _setup_vector_store(self):
+        """Set up or load vector store"""
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        docs_path = os.path.join(script_dir, "documents")
+        
+        # Vector store is initialized in __init__, so this can be used for additional setup if needed
+        docs = []  # Load or define documents here
+        for filename in os.listdir(docs_path):
+            file_path = os.path.join(docs_path, filename)
+            if filename.endswith('.txt'):
+                loader = TextLoader(file_path)
+                docs.extend(loader.load())
+
+        # Split documents
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        all_splits = text_splitter.split_documents(docs)
+        
+        # Index chunks
+        _ = vector_store.add_documents(documents=all_splits)
+
+    def query(self, question: str, thread_id: str = "default") -> str:
+        """Query the RAG system
+
+        Args:
+            question: User's question
+            thread_id: Thread ID for conversation memory
+
+        Returns:
+            Answer as a string
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+
+        messages = []
+        for event in self.agent_executor.stream(
+            {"messages": [{"role": "user", "content": question}]},
+            stream_mode="values",
+            config=config,
+        ):
+            messages.append(event["messages"][-1])
+
+        # Return the last AI message content
+        if messages:
+            last_message = messages[-1]
+            return last_message.content if hasattr(last_message, 'content') else str(last_message)
+        return "No response generated"
+
+    def query_stream(self, question: str, thread_id: str = "default"):
+        """Stream query responses
+
+        Args:
+            question: User's question
+            thread_id: Thread ID for conversation memory
+
+        Yields:
+            Message events from the agent
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+
+        for event in self.agent_executor.stream(
+            {"messages": [{"role": "user", "content": question}]},
+            stream_mode="values",
+            config=config,
+        ):
+            yield event["messages"][-1]
+
+    def get_table_info(self) -> str:
+        """Get database table information"""
+        return self.db.get_table_info()
+
+
+# Legacy functions for backward compatibility
 def write_query(state: State):
     """Generate SQL query to fetch information."""
     prompt = query_prompt_template.invoke(
@@ -190,6 +316,69 @@ def generate(state: MessagesState):
 
 # message
 def main():
+    global db, llm, vector_store, query_prompt_template, system_message
+
+    # Global variables
+    llm = ChatGroq(model_name="llama-3.3-70b-versatile")
+    # llm = init_chat_model("claude-sonnet-4-20250514")
+        
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+    vector_store = Chroma(
+        collection_name="example_collection",
+        embedding_function=embeddings,
+        persist_directory="./chroma_langchain_db",  # Where to save data locally, remove if not necessary
+    )
+
+    # SQL
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(script_dir, "cruises.db")
+    db = SQLDatabase.from_uri(f"sqlite:///{db_path}")
+
+
+    system_message = """
+    You are an agent designed to interact with a SQL database.
+    Given an input question, create a syntactically correct {dialect} query to run,
+    then look at the results of the query and return the answer. Unless the user
+    specifies a specific number of examples they wish to obtain, always limit your
+    query to at most {top_k} results.
+
+    You can order the results by a relevant column to return the most interesting
+    examples in the database. Never query for all the columns from a specific table,
+    only ask for the relevant columns given the question.
+
+    You MUST double check your query before executing it. If you get an error while
+    executing a query, rewrite the query and try again.
+
+    DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the
+    database.
+
+    To start you should ALWAYS look at the tables in the database to see what you
+    can query. Do NOT skip this step.
+
+    Then you should query the schema of the most relevant tables.
+
+    Never query for all the columns from a specific table, only ask for a the
+    few relevant columns given the question.
+
+    Pay attention to use only the column names that you can see in the schema
+    description. Be careful to not query for columns that do not exist. Also,
+    pay attention to which column is in which table.
+
+    Only use the following tables:
+    {table_info}
+    """.format(
+        dialect="SQLite",
+        top_k=10,
+        table_info=db.get_table_info(),
+    )
+
+    user_prompt = "Question: {input}"
+
+    query_prompt_template = ChatPromptTemplate(
+        [("system", system_message), ("user", user_prompt)]
+    )
+
     # Agents
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
