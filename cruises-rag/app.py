@@ -1,266 +1,229 @@
 """
-Streamlit Web Interface for Structured RAG System
-Deploy at rag.guillaume.genois.ca
+Gradio Web Interface for Cruise RAG System
+Lightweight alternative to Streamlit
 """
 
-import streamlit as st
-import os
-from pathlib import Path
-import pandas as pd
-from datetime import datetime
+import gradio as gr
 from rag import CruiseRAG
-import logging
-from io import StringIO
+from pathlib import Path
+import traceback
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Initialize RAG system once at startup
+print("🚀 Initializing RAG system...")
+try:
+    rag_system = CruiseRAG(chroma_persist_dir="./chroma_langchain_db")
+    print("✅ RAG system initialized successfully!")
+except Exception as e:
+    print(f"❌ Error initializing RAG system: {e}")
+    traceback.print_exc()
+    rag_system = None
 
-# Page config
-st.set_page_config(
-    page_title="Celebrity Cruises RAG Assistant",
-    page_icon="🚢",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+def chat_function(message, history, thread_id, show_steps=False):
+    """Process user message and return response"""
+    if not rag_system:
+        return "❌ RAG system not initialized. Please check the logs."
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-    }
-    .user-message {
-        background-color: #e3f2fd;
-    }
-    .assistant-message {
-        background-color: #f5f5f5;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Initialize session state
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-if 'rag_system' not in st.session_state:
-    st.session_state.rag_system = None
-if 'logs' not in st.session_state:
-    st.session_state.logs = []
-
-def log_message(message, level="INFO"):
-    """Add message to logs"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_entry = f"[{timestamp}] {level}: {message}"
-    st.session_state.logs.append(log_entry)
-    logger.info(message)
-
-def initialize_rag_system():
-    """Initialize the RAG system"""
     try:
-        # CruiseRAG automatically uses cruises.db in same directory
-        with st.spinner("🔄 Initializing RAG system..."):
-            rag_system = CruiseRAG(chroma_persist_dir="./chroma_langchain_db")
-            log_message("RAG system initialized successfully")
-            return rag_system
+        # Stream response and collect steps
+        steps_log = []
+        final_response = ""
+
+        for event in rag_system.query_stream(message, thread_id=thread_id):
+            # Extract message from event tuple
+            if event[0] == "values":
+                latest_message = event[1]['messages'][-1]
+            elif event[0] == "messages":
+                latest_message = event[1][0]
+                metadata = event[1][1] if len(event[1]) > 1 else {}
+            else:
+                continue
+
+            # Process message
+            if hasattr(latest_message, 'type'):
+                agent_name = metadata.get('langgraph_node', 'unknown') if event[0] == "messages" else 'agent'
+
+                if latest_message.type == "ai":
+                    # Capture AI responses
+                    if hasattr(latest_message, 'content') and latest_message.content:
+                        # Always update final_response with latest AI content
+                        if agent_name != 'supervisor':
+                            final_response = latest_message.content
+
+                        if show_steps:
+                            steps_log.append(f"**[{agent_name}]** {latest_message.content[:]}...")
+
+                    # Log tool calls
+                    if hasattr(latest_message, 'tool_calls') and latest_message.tool_calls and show_steps:
+                        for tool_call in latest_message.tool_calls:
+                            tool_name = tool_call.get('name', 'unknown')
+                            steps_log.append(f"🔧 **Tool:** {tool_name}")
+
+                elif latest_message.type == "tool" and show_steps:
+                    tool_name = getattr(latest_message, 'name', 'unknown')
+                    content_preview = str(latest_message.content)[:]
+                    steps_log.append(f"📊 **Tool Result ({tool_name}):** {content_preview}...")
+
+        # Format final response
+        if not final_response:
+            final_response = "No response generated. Please check the logs or try again."
+            print(f"⚠️ Warning: No final response captured from stream")
+
+        # Add steps if requested
+        if show_steps and steps_log:
+            steps_section = "\n\n---\n### 🔍 Agent Steps:\n" + "\n".join(steps_log)
+            return final_response + steps_section
+
+        return final_response
+
     except Exception as e:
-        st.error(f"❌ Error initializing RAG system: {str(e)}")
-        log_message(f"Error initializing RAG system: {str(e)}", "ERROR")
-        return None
+        error_msg = f"❌ Error processing query: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        return error_msg
 
+def get_system_info():
+    """Get system information for display"""
+    info = "## 📊 System Status\n\n"
 
-# Sidebar
-with st.sidebar:
-    st.markdown("### 🎛️ Controls")
-
-    # Initialize button
-    if st.button("🔄 Initialize/Reload RAG System"):
-        st.session_state.rag_system = initialize_rag_system()
-        if st.session_state.rag_system:
-            st.success("✅ System initialized!")
-
-    st.markdown("---")
-
-    # Database info
-    st.markdown("### 📊 Database Info")
-    if st.session_state.rag_system:
-        db_path = Path("./cruises.db")
-        if db_path.exists():
-            st.success(f"✅ Database connected")
-            st.text(f"📄 cruises.db")
-        else:
-            st.warning("⚠️ Database file not found")
+    # RAG System Status
+    if rag_system:
+        info += "✅ **RAG System:** Connected\n\n"
     else:
-        st.info("Initialize system to check database")
+        info += "❌ **RAG System:** Not initialized\n\n"
 
-    st.markdown("---")
-
-    # Settings
-    st.markdown("### ⚙️ Settings")
-
-    # Thread ID for conversation memory
-    thread_id = st.text_input("Thread ID", value="default", help="Change to start a new conversation thread")
-
-    # Clear chat button
-    if st.button("🗑️ Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
-
-    st.markdown("---")
-
-    # Logs toggle
-    show_logs = st.checkbox("📋 Show Logs", value=False)
-
-# Main content
-st.markdown('<h1 class="main-header">🚢 Celebrity Cruises RAG Assistant</h1>', unsafe_allow_html=True)
-
-# System status
-col1, col2, col3 = st.columns([1, 1, 1])
-with col1:
-    if st.session_state.rag_system:
-        st.success("✅ System Ready")
+    # Database Status
+    db_path = Path("./cruises.db")
+    if db_path.exists():
+        info += "✅ **Database:** Connected (`cruises.db`)\n\n"
     else:
-        st.warning("⚠️ System Not Initialized")
+        info += "⚠️ **Database:** Not found\n\n"
 
-with col2:
-    db_exists = Path("./cruises.db").exists()
-    if db_exists:
-        st.info(f"📊 Database connected")
+    # Documents
+    docs_dir = Path("./documents")
+    if docs_dir.exists():
+        doc_files = [f for f in docs_dir.glob("*") if f.is_file()]
+        info += f"📁 **Documents:** {len(doc_files)} files\n\n"
+        for doc in sorted(doc_files):
+            info += f"  - 📄 {doc.name}\n"
     else:
-        st.warning("⚠️ No database")
+        info += "📁 **Documents:** No documents folder\n"
 
-with col3:
-    st.info(f"💬 {len(st.session_state.messages)} messages")
+    return info
 
-st.markdown("---")
+# Create Gradio interface
+with gr.Blocks(
+    title="Celebrity Cruises RAG Assistant",
+    theme=gr.themes.Soft(),
+) as demo:
 
-# Chat interface
-st.markdown("### 💬 Chat with your data")
+    gr.Markdown("""
+    # 🚢 Celebrity Cruises RAG Assistant
 
-# Display chat messages
-for message in st.session_state.messages:
-    role = message["role"]
-    content = message["content"]
+    Ask questions about cruise availability, pricing, schedules, and more!
+    """)
 
-    if role == "user":
-        st.markdown(f'<div class="chat-message user-message">👤 **You:** {content}</div>',
-                   unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div class="chat-message assistant-message">🤖 **Assistant:** {content}</div>',
-                   unsafe_allow_html=True)
+    with gr.Row():
+        with gr.Column(scale=3):
+            # Chat interface
+            chatbot = gr.Chatbot(
+                label="Chat",
+                height=500,
+                show_copy_button=True,
+            )
 
-# Chat input
-user_query = st.chat_input("Ask about cruises... (e.g., 'Show me cruises in October 2026')")
+            with gr.Row():
+                msg = gr.Textbox(
+                    label="Your question",
+                    placeholder="Ask about cruises... (e.g., 'Show me cruises in October 2026')",
+                    scale=4,
+                )
+                submit = gr.Button("Send", variant="primary", scale=1)
 
-if user_query:
-    # Add user message to chat
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    log_message(f"User query: {user_query}")
+            gr.Examples(
+                examples=[
+                    "Show me cruises in October 2025",
+                    "What are the available 7-night cruises?",
+                    "Tell me about European cruises from Amsterdam",
+                    "What's the price range for Caribbean cruises?",
+                    "Hi, how are you?",
+                ],
+                inputs=msg,
+            )
 
-    # Check if system is initialized
-    if not st.session_state.rag_system:
-        st.warning("⚠️ Please initialize the RAG system first (click button in sidebar)")
-        log_message("Query attempted before system initialization", "WARNING")
-    else:
-        # Get response with streaming (logs steps, displays final answer)
-        try:
-            with st.spinner("🔍 Processing your query..."):
-                final_response = ""
+            clear = gr.Button("🗑️ Clear Chat")
 
-                # Stream through agent steps
-                for message in st.session_state.rag_system.query_stream(user_query, thread_id=thread_id):
-                    # Log each step
-                    if hasattr(message, 'type'):
-                        if message.type == "ai":
-                            if hasattr(message, 'tool_calls') and message.tool_calls:
-                                # Log tool calls
-                                for tool_call in message.tool_calls:
-                                    log_message(f"Tool call: {tool_call.get('name', 'unknown')}")
-                            if hasattr(message, 'content') and message.content:
-                                final_response = message.content
-                                log_message(f"AI response: {message.content}")
-                        elif message.type == "tool":
-                            log_message(f"Tool result: {str(message.content)}")
-                        elif message.type == "human":
-                            log_message(f"User query: {message.content}")
+        with gr.Column(scale=1):
+            # Sidebar with settings and info
+            gr.Markdown("### ⚙️ Settings")
 
-                # Add final response to chat
-                if final_response:
-                    st.session_state.messages.append({"role": "assistant", "content": final_response})
-                    log_message(f"Response generated successfully")
-                else:
-                    st.session_state.messages.append({"role": "assistant", "content": "No response generated"})
-                    log_message(f"No response generated", "WARNING")
+            thread_id = gr.Textbox(
+                label="Thread ID",
+                value="default",
+                info="Change to start a new conversation"
+            )
 
-                # Rerun to update chat display
-                st.rerun()
-        except Exception as e:
-            error_msg = f"Error processing query: {str(e)}"
-            st.error(f"❌ {error_msg}")
-            log_message(error_msg, "ERROR")
+            show_steps = gr.Checkbox(
+                label="Show Agent Steps",
+                value=False,
+                info="Display tool calls and agent reasoning"
+            )
 
-# Logs section (collapsible)
-if show_logs:
-    st.markdown("---")
-    st.markdown("### 📋 System Logs")
+            gr.Markdown("---")
 
-    if st.session_state.logs:
-        # Create scrollable container with all logs
-        st.markdown("""
-        <style>
-        .log-container {
-            height: 400px;
-            overflow-y: scroll;
-            border: 1px solid #ddd;
-            padding: 10px;
-            background-color: #f8f9fa;
-            font-family: monospace;
-            font-size: 0.85rem;
-            border-radius: 5px;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+            system_info = gr.Markdown(get_system_info())
 
-        logs_html = "<div class='log-container'>"
-        for log in st.session_state.logs:
-            logs_html += f"<div>{log}</div>"
-        logs_html += "</div>"
+            refresh_btn = gr.Button("🔄 Refresh Info")
 
-        st.markdown(logs_html, unsafe_allow_html=True)
+    # Event handlers
+    def respond(message, chat_history, thread_id, show_steps):
+        if not message.strip():
+            return chat_history, ""
 
-        # Download logs button
-        full_logs = "\n".join(st.session_state.logs)
-        st.download_button(
-            label="💾 Download Full Logs",
-            data=full_logs,
-            file_name=f"rag_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain"
-        )
-    else:
-        st.info("No logs yet")
+        # Add user message to history
+        chat_history.append((message, None))
 
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; font-size: 0.9rem;'>
-    <p>Celebrity Cruises RAG Assistant | Powered by LangChain & Groq</p>
-    <p>📧 guillaume.genois.ca</p>
-</div>
-""", unsafe_allow_html=True)
+        # Get bot response
+        bot_response = chat_function(message, chat_history, thread_id, show_steps)
 
-# Auto-initialize on first load
-if st.session_state.rag_system is None:
-    st.session_state.rag_system = initialize_rag_system()
+        # Update history with bot response
+        chat_history[-1] = (message, bot_response)
+
+        return chat_history, ""
+
+    # Submit on button click
+    submit.click(
+        respond,
+        inputs=[msg, chatbot, thread_id, show_steps],
+        outputs=[chatbot, msg],
+    )
+
+    # Submit on enter
+    msg.submit(
+        respond,
+        inputs=[msg, chatbot, thread_id, show_steps],
+        outputs=[chatbot, msg],
+    )
+
+    # Clear chat
+    clear.click(lambda: None, None, chatbot, queue=False)
+
+    # Refresh system info
+    refresh_btn.click(
+        get_system_info,
+        outputs=system_info,
+    )
+
+    gr.Markdown("""
+    ---
+    **Celebrity Cruises RAG Assistant** | Powered by LangChain & Groq
+    📧 guillaume.genois.ca
+    """)
+
+# Launch the app
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=8501,
+        share=False,
+        show_error=True,
+    )
