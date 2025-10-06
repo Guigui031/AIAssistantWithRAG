@@ -1,0 +1,107 @@
+# Celebrity Cruises Database Schema Guide
+
+## Table: celebrity_cruises
+
+The table contains avalaible cruises offered by Celebrity. Each row is a cruise.
+
+### Column Descriptions
+
+**Product Columns:**
+- `product` (TEXT): The cruise destination/region (e.g., "Europe", "7n Caribbean", "Asia")
+- `ship` (TEXT): Ship identifier code (e.g., "SI", "EC", "AX", "BY")
+- `sail_nights` (INTEGER): Duration of the cruise in nights (e.g., 7, 10, 12, 14)
+
+**Location Columns:**
+- `city_of_departure` (TEXT): Departure city with country (e.g., "Amsterdam, Netherlands", "Reykjavik, Iceland", "Southampton, England")
+
+**Date/Time Columns:**
+- `sail_date` (TEXT): Human-readable sail date (e.g., "Saturday, August 08, 2026")
+- `num_date` (TIMESTAMP): Sail date as timestamp for calculations (format: YYYY-MM-DD HH:MM:SS)
+- `year` (INTEGER): Sail year (e.g., 2025, 2026)
+- `month` (INTEGER): Sail month as number (1=January, 2=February, ..., 12=December)
+- `day` (INTEGER): Day of month (1-31)
+
+**Booking/Group Columns:**
+- `group_id` (INTEGER): Unique identifier for the group booking
+- `group_name` (TEXT): Name/description of the group booking
+- `cabin_category` (TEXT): Cabin type code (e.g., "SV", "A1", "C2", "1A", "1C")
+- `cabins_requested` (INTEGER): Total cabins requested for this group
+- `cabins_named` (INTEGER): Number of cabins with named passengers
+- `cabins_unnamed` (INTEGER): Number of cabins without named passengers yet
+
+**Pricing Columns:**
+- `price` (TEXT): Price category or special pricing code (e.g., "GROUPX")
+- `group_fare*` (TEXT): Group fare price (may contain commas, e.g., "4,469")
+- `laf*` (TEXT): List price or advertised fare (may contain commas)
+- `group_fare_advantage` (TEXT): Savings amount from group fare vs list price (may contain commas, can be negative)
+- `taxes_per_guest` (INTEGER): Tax amount per guest
+- `currency` (TEXT): Currency code (e.g., "CAD", "USD", "EUR")
+
+### Common Query Patterns
+
+**Finding cruises by date:**
+- Use `month` column for month filtering: `WHERE month = 10` for October
+- Use `year` column for year filtering: `WHERE year = 2025`
+- Combine both: `WHERE year = 2025 AND month = 10` for October 2025
+- Use `num_date` for date range queries: `WHERE num_date >= '2025-10-01' AND num_date < '2025-11-01'`
+
+**Finding cruises by location:**
+- Departure city: `WHERE city_of_departure LIKE '%Amsterdam%'`
+- Destination region: `WHERE product LIKE '%Europe%'` or `WHERE product = 'Europe'`
+
+**Finding cruises by duration:**
+- Specific duration: `WHERE sail_nights = 7` for 7-night cruises
+- Duration range: `WHERE sail_nights BETWEEN 7 AND 14`
+
+**Finding cruises by availability:**
+- Cabins available: `WHERE cabins_requested > 0`
+- Specific cabin type: `WHERE cabin_category = 'SV'`
+
+**Price analysis:**
+- Best group discounts: `ORDER BY CAST(REPLACE(group_fare_advantage, ',', '') AS INTEGER) DESC`
+- Lowest fares: `ORDER BY CAST(REPLACE(group_fare*, ',', '') AS INTEGER) ASC`
+
+### Important Notes
+
+1. **Date Handling**: The `month` column uses integers (1-12), not month names. January=1, February=2, etc.
+
+2. **Price Handling**: Price columns contain commas and may be strings. Use `REPLACE(column, ',', '')` and `CAST()` for numeric operations.
+
+3. **Ship Codes**: Ships are abbreviated. Common codes:
+   - SI = Celebrity Silhouette
+   - EC = Celebrity Eclipse
+   - AX = Celebrity Apex
+   - BY = Celebrity Beyond
+
+4. **Product Names**: Some products include duration in name (e.g., "7n Caribbean" means 7-night Caribbean cruise).
+
+5. **Cabin Categories**: Different cabin types have different codes. Higher categories generally mean better cabins.
+
+### Example Queries
+
+```sql
+-- Cruises in October 2025
+SELECT product, city_of_departure, ship, sail_date, sail_nights
+FROM celebrity_cruises
+WHERE year = 2025 AND month = 10
+LIMIT 10;
+
+-- European cruises from Amsterdam
+SELECT product, ship, sail_date, cabin_category, sail_nights
+FROM celebrity_cruises
+WHERE city_of_departure LIKE '%Amsterdam%' AND product LIKE '%Europe%'
+LIMIT 10;
+
+-- 7-night cruises with availability
+SELECT product, city_of_departure, sail_date, cabins_requested
+FROM celebrity_cruises
+WHERE sail_nights = 7 AND cabins_requested > 0
+LIMIT 10;
+
+-- Cruises with best group discounts
+SELECT product, sail_date, group_fare_advantage, currency
+FROM celebrity_cruises
+WHERE group_fare_advantage IS NOT NULL
+ORDER BY CAST(REPLACE(group_fare_advantage, ',', '') AS INTEGER) DESC
+LIMIT 10;
+```

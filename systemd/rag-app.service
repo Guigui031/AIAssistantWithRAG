@@ -1,15 +1,21 @@
 [Unit]
-Description=Celebrity Cruises RAG Streamlit App
+Description=Celebrity Cruises RAG Gradio App
 After=network.target
 
 [Service]
 Type=simple
 User=www-data
+Group=www-data
 WorkingDirectory=/var/www/rag.guillaume.genois.ca
 Environment="PATH=/var/www/rag.guillaume.genois.ca/venv/bin"
-ExecStart=/var/www/rag.guillaume.genois.ca/venv/bin/streamlit run app.py
+Environment="PYTHONUNBUFFERED=1"
+Environment="TRANSFORMERS_CACHE=/var/www/rag.guillaume.genois.ca/model_cache"
+Environment="HF_HOME=/var/www/rag.guillaume.genois.ca/model_cache"
+ExecStart=/var/www/rag.guillaume.genois.ca/venv/bin/python app_gradio.py
 Restart=always
 RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
