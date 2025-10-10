@@ -1,10 +1,20 @@
-pandas
-streamlit
+# For production deployment
+
+# LangChain Core
 langchain
 langchain-community
-langchain-groq
+
+# LangGraph
 langgraph
+langgraph-supervisor
+
+# LLM Providers
+langchain-groq
+
+# Vector Store & Embeddings
+langchain-chroma
 chromadb
 sentence-transformers
-pandas
-python-dotenv
+
+# Web Interface
+gradio
