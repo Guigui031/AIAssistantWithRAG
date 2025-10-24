@@ -7,6 +7,7 @@ import gradio as gr
 from rag import CruiseRAG
 from pathlib import Path
 import traceback
+import uuid
 
 # Initialize RAG system once at startup
 print("🚀 Initializing RAG system...")
@@ -158,7 +159,7 @@ with gr.Blocks(
 
             thread_id = gr.Textbox(
                 label="Thread ID",
-                value="default",
+                value=str(uuid.uuid4()),
                 info="Change to start a new conversation"
             )
 
